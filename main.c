@@ -17,6 +17,8 @@ uint8_t stop = 0;
 char telem1_path[255] = "/dev/rfcomm0";
 char telem2_path[255] = "/dev/ttyAMA0";
 
+uint32_t tty_speed=57600;
+
 #define MAX_BUF 256
 int telem1_fd=0, telem2_fd=0;
 
@@ -28,18 +30,20 @@ void catch_signal(int sig)
 }
 
 void print_usage() {
-    printf("Usage: %s -a [telem1_uart] -b [telem2_uart]\n",PACKAGE_NAME);
+    printf("Usage: %s -a [telem1_uart] -b [telem2_uart] -s [speed]\n",PACKAGE_NAME);
     printf("-h\thelp\n");;        
     printf("[telem1_uart] path to telemetry1 uart [defaults: %s]\n",telem1_path);
     printf("[telem2_uart] path to telemetry2 uart [defaults: %s]\n",telem2_path);
+    printf("[speed] serial port speed [defaults: %u]\n",tty_speed);
 }
 
 int set_defaults(int c, char **a) {
     int option;
-    while ((option = getopt(c, a,"a:b:")) != -1) {
+    while ((option = getopt(c, a,"a:b:s:")) != -1) {
         switch (option)  {
             case 'a': strcpy(telem1_path,optarg); break;
             case 'b': strcpy(telem2_path,optarg); break;
+	    case 's': tty_speed = atoi(optarg); break;
             default:
                 print_usage();
                 return -1;
@@ -114,6 +118,17 @@ void cleanup() {
     printf("Bye.\n");
 }
 
+speed_t get_tty_speed(uint32_t v) {
+    switch(v) {
+	case 9600: return B9600;
+	case 19200: return B19200;
+	case 38400: return B38400;
+	case 57600: return B57600;
+	case 115200: return B115200;
+	default: return B0;
+    }
+}
+
 int uart_open(const char *path, int flags) {
     int ret = open(path, flags);
 
@@ -125,11 +140,6 @@ int uart_open(const char *path, int flags) {
     struct termios options;
     tcgetattr(ret, &options);
     
-    //options.c_cflag = B115200 | CS8 | CLOCAL | CREAD;
-    //options.c_iflag = IGNPAR;
-    //options.c_lflag = 0;
-    //options.c_oflag = 0;
-
     options.c_cflag &= ~(CSIZE | PARENB);
     options.c_cflag |= CS8;
 
@@ -142,7 +152,8 @@ int uart_open(const char *path, int flags) {
     
     options.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
 
-    if(cfsetispeed(&options, B115200) < 0 || cfsetospeed(&options, B115200) < 0) {
+    if(cfsetispeed(&options, get_tty_speed(tty_speed)) < 0 || cfsetospeed(&options,
+	get_tty_speed(tty_speed)) < 0) {
         return -1;
     }
 
