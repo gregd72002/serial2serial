@@ -16,7 +16,8 @@ uint8_t stop = 0;
 
 char telem1_path[255] = "/dev/rfcomm0";
 char telem2_path[255] = "/dev/ttyAMA0";
-
+char pcap_path[255] = "/tmp/serial.pcap";
+uint8_t pcap_debug = 0;
 uint32_t tty_speed=57600;
 
 #define MAX_BUF 256
@@ -30,8 +31,9 @@ void catch_signal(int sig)
 }
 
 void print_usage() {
-    printf("Usage: %s -a [telem1_uart] -b [telem2_uart] -s [speed]\n",PACKAGE_NAME);
-    printf("-h\thelp\n");;        
+    printf("Usage: %s -a [telem1_uart] -b [telem2_uart] -s [speed] -d\n",PACKAGE_NAME);
+    printf("-h\thelp\n");
+    printf("-d\tactivate pcap capture into %s\n",pcap_path);      
     printf("[telem1_uart] path to telemetry1 uart [defaults: %s]\n",telem1_path);
     printf("[telem2_uart] path to telemetry2 uart [defaults: %s]\n",telem2_path);
     printf("[speed] serial port speed [defaults: %u]\n",tty_speed);
@@ -39,11 +41,12 @@ void print_usage() {
 
 int set_defaults(int c, char **a) {
     int option;
-    while ((option = getopt(c, a,"a:b:s:")) != -1) {
+    while ((option = getopt(c, a,"a:b:s:d")) != -1) {
         switch (option)  {
             case 'a': strcpy(telem1_path,optarg); break;
             case 'b': strcpy(telem2_path,optarg); break;
-	    case 's': tty_speed = atoi(optarg); break;
+	        case 's': tty_speed = atoi(optarg); break;
+            case 'd': pcap_debug = 1; break;
             default:
                 print_usage();
                 return -1;
@@ -52,6 +55,92 @@ int set_defaults(int c, char **a) {
     }
     return 0;
 } 
+
+int fp1 = 0;
+
+void pcap_header(int fp) {
+        uint32_t magic_number=0xa1b2c3d4;
+        uint16_t version_major=2;
+        uint16_t version_minor=4;  /* minor version number */
+        int32_t  thiszone=0;       /* GMT to local correction */
+        uint32_t sigfigs=0;        /* accuracy of timestamps */
+        uint32_t snaplen=65535;        /* max length of captured packets, in octets */
+        //uint32_t network=195;        /* data link type */
+        uint32_t network=113;        /* data link type */
+
+        write(fp,&magic_number,4);
+        write(fp,&version_major,2);
+        write(fp,&version_minor,2);
+        write(fp,&thiszone,4);
+        write(fp,&sigfigs,4);
+        write(fp,&snaplen,4);
+        write(fp,&network,4);
+}
+
+void pcap_packet(int fp, char *buf, int len, int dir) {
+    static uint32_t sec=0;
+    static uint32_t usec=0;
+
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    sec = tv.tv_sec;
+    usec = tv.tv_usec;
+/*
+    usec += 100;
+    if (usec==1000000) {
+        sec++;
+        usec=0;
+    }
+*/
+
+    uint32_t ts_sec = sec;
+    uint32_t ts_usec = usec;
+    uint32_t incl_len=len+16;
+    uint32_t orig_len=len+16; 
+
+    write(fp,&ts_sec,4);
+    write(fp,&ts_usec,4);
+    write(fp,&incl_len,4);
+    write(fp,&orig_len,4);
+
+    //packet header
+    uint16_t v;
+    v=(dir==0?4:0); //0-to us; 4-from us
+    v=htons(v);
+    write(fp,&v,2);
+
+    v=0;
+    write(fp,&v,2);
+
+    v=0; //address length
+    write(fp,&v,2);
+
+    uint64_t v1=0; //address
+    write(fp,&v1,8);
+
+    v=0; //1-without an 802.2 LLC header
+    v=htons(v);
+    //v=ntohs(v);
+    write(fp,&v,2);
+
+    write(fp,buf,len);
+}
+
+void pcap(int s, char *buf, int len) {
+    static int init = 0;
+    static int site1 = -1;
+    if (site1==-1) site1=s;
+
+
+    if (init==0) {
+        fp1 = open("/tmp/serial.pcap",O_WRONLY | O_CREAT, 0777);
+        pcap_header(fp1);
+        init++;
+    }
+
+    if (s==site1) pcap_packet(fp1,buf,len,0);
+    else pcap_packet(fp1,buf,len,1);
+}
 
 void forward_telem(int s, int t) {
     int len,len1;
@@ -65,6 +154,9 @@ void forward_telem(int s, int t) {
         return;
     }
             
+    if (pcap_debug) pcap(s,buf,len);
+    //pcap(s,buf,len);
+
     len1 = write(t,buf,len);
             
     if (len!=len1) {
@@ -84,7 +176,7 @@ void loop() {
     FD_SET(telem1_fd, &fdlist);
     FD_SET(telem2_fd, &fdlist);
 
-    printf("Started.\n");
+    printf("Started. On %s and %s with speed: %u\n",telem1_path,telem2_path,tty_speed);
     while (!stop) {
         rlist = fdlist;
         tv.tv_sec = 1; 
@@ -113,6 +205,7 @@ void loop() {
 }
 
 void cleanup() {
+    if (fp1) close(fp1);
     if (telem1_fd) close(telem1_fd);
     if (telem2_fd) close(telem2_fd);
     printf("Bye.\n");
@@ -125,7 +218,7 @@ speed_t get_tty_speed(uint32_t v) {
 	case 38400: return B38400;
 	case 57600: return B57600;
 	case 115200: return B115200;
-	default: return B0;
+	default: return 0;
     }
 }
 
@@ -135,6 +228,11 @@ int uart_open(const char *path, int flags) {
     if (ret<0) {
         printf("open failed on %s [%i] [%s]\n",path,errno,strerror(errno));
         return ret;
+    }
+
+    if (get_tty_speed(tty_speed)==0) {
+	printf("Incorrect serial speed: %u\n",tty_speed);
+	return -1;
     }
 
     struct termios options;
